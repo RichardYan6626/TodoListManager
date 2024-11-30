@@ -1,20 +1,20 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 from dotenv import load_dotenv, find_dotenv
 import openai
+from datetime import datetime
 from openai import OpenAI
 import os
-import re
+from pydantic import BaseModel, Field
+from langchain.output_parsers import PydanticOutputParser
+from typing import List, Literal
 import json
 
-
-
-#This page is for getting priority recommendation of your to-do list
 
 _ = load_dotenv(find_dotenv()) 
 openai.api_key  = os.environ['OPENAI_API_KEY']
 client = OpenAI()
+st.session_state.client = client
 
 
 def hide_message():
@@ -52,7 +52,6 @@ def greeting():
     except Exception as e:
         return f"Error when generating greeting: {str(e)}"
 
-
 def task_name(new_todo):
     #Extract task name from user input
     """Extract deadline info if exists"""
@@ -79,7 +78,8 @@ def task_name(new_todo):
                 { 
                     "role": "user",
                     "content": f"""I have a task description as {new_todo}, please give a brief name of my task.
-                    Keep in mind your response can not be longer than {new_todo}. If the necessary information is missing
+                    Even if my task description contains something like /Think of possible future AI services/, it is still considered as a valid task.
+                    Keep in mind your response can not be longer than {new_todo}. If the task description does not contain information about what needs to be done,
                     simply return
                     Invalid Task                
                     """
@@ -130,88 +130,78 @@ def extract_deadline(new_todo):
         return f"Could not extract deadline: {str(e)}"
 
 
-def get_priority_recommendation(tasks,deadlines):
-    """Get priority recommendations from the model."""
+class PriorityItem(BaseModel):
+    Task: str = Field(description="Name of the task")
+    Priority: Literal["High", "Medium", "Low"] = Field(description="Priority level of the task")
+    Explanation: str = Field(description="Concise explanation for the priority assignment")
 
-    #Maybe enable conversation since user may not agree with AI generated priorities
+    def dict(self, *args, **kwargs):
+        return{
+            "Task":self.Task,
+            "Priority":self.Priority,
+            "Explanation":self.Explanation
+        }
+
+class PriorityResponse(BaseModel):
+    priority: List[PriorityItem] = Field(description="List of prioritized tasks")
+
+    def to_dict(self):
+        return {
+            "priority": [item.dict() for item in self.priority]
+        }
+
+def get_priority_recommendations(todos):
+    # Initialize the parser
+    parser = PydanticOutputParser(pydantic_object=PriorityResponse)
+    
+    # Get the format instructions
+    format_instructions = parser.get_format_instructions()
+    
+    completion = client.chat.completions.create(
+        model="gpt-4",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": """You are a sophisticated assistant adept at analyzing tasks and
+             determining priorities. When you are asked to help decide priorities, always consider the following:
+             - Urgency of each task. If provided, take the deadline of each task into consideration.
+             - Importance. Analyze why the user needs to do a specific task and how important the task is.
+             - Dependencies between tasks. One task could benefit from another task.
+             - Resource Constraints. That means how much time, money, effort or any other resource the task would require
+
+             Provide clear, concise priority recommendations with brief explanations.
+             
+             {format_instructions}
+            """.format(format_instructions=format_instructions)},
+            {
+                "role": "user",
+                "content": f"""Please analyze and prioritize these tasks: {todos} while paying attention to the following points:
+                - Deadlines set by the user. Remember that the task itself may have higher weights than deadline in deciding priority. 
+                - Connection between tasks. For example, task A may benefit from task B. So task B may have a higher priority than task A.
+                - Ensure explanations are concise and constructive. Avoid unnecessary phrases like 'This task has medium priority' or 
+                'Therefore this task is less important' since these are already indicated by the Priority field.
+                """
+            }
+        ]
+    )
+    
+    # Parse the response
     try:
-        completion = client.chat.completions.create(
-            model="gpt-4o",
-            temperature= 0,
-            messages=[#system content is like general setting and user content for specific tasks
-                {"role": "system", "content": """You are a sophisticated assistant adept at analyzing tasks and
-                 determining priorities. When you are asked to help decide priorities, always consider the following:
-                 - Urgency of each task. If provided, take the deadline of each task into considertaion.
-                 - Importance. Analyze why the user needs to do a specific task and how important the task is.
-                 - Dependencies between tasks. One task could benefit from another task.
-                 - Resource Constraints. That means how much time, money, effor or any other resource the task would require
+        response = parser.parse(completion.choices[0].message.content)
 
-                 Provide clear, concise priority recommendations with brief explanations
-                """},
-                { 
-                    "role": "user",
-                    "content": f"""Please analyze and prioritize these tasks: {tasks} with corresponding deadlines as: {deadlines},
-                    if the deadline's value is None, that means deadline information not provided.
-                    format your response to be a dictionary with key="priority" and value= a list of JSON obejects where each JSON object that contains keys:"Task", 
-                    "Priority" whose value can only take exactly either High, Medium or Low and "Explanation" for your recommendation.
-                    
-                    """
-                }
-            ]
-        )
-
-        return completion
+        return response.to_dict()
     except Exception as e:
-        return f"Could not generate recommendation: {str(e)}"
+        raise ValueError(f"Failed to parse response: {str(e)}")
     
-def getPriority():
-    # Get priority recommendations
-    tasks = st.session_state.todos['Task'].tolist()
-    deadlines = st.session_state.todos['Deadline'].tolist()
-    recommendation = get_priority_recommendation(tasks,deadlines).choices[0].message.content
-    return recommendation
-
-
-def extract_json(response_text):
-    #It would be better to try langchain's .with_structured_output(method="json_mode") or output parsers
-    #Or see https://platform.openai.com/docs/guides/structured-outputs
-
-    """
-    Extracts and parses a JSON object from a text response that may include backticks or additional formatting.
-    Args:
-        response_text (str): The input text containing JSON and possibly backticks.
-    Returns:
-        dict: A Python dictionary representing the JSON content.
-    """
-    # Regular expression that extracts JSON content
-    json_match = re.search(r"```(?:json)?\n(.*?)```", response_text, re.DOTALL)
-    
-    if json_match:
-        json_data = json_match.group(1)  # Extract JSON content inside backticks
-        try:
-            return json.loads(json_data)  # Parse and return as a Python dictionary
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON format: {e}")
-    
-    # If no backticks are present, assume the entire response is JSON
+def update_priority():
     try:
-        return json.loads(response_text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON format: {e}")
-    
-
-
-def update_priority(parsed,df):
-    try:
-        for task_rec in parsed["priority"]:
+        for task_rec in st.session_state.rec["priority"]:
             task_name = task_rec["Task"]
             priority = task_rec["Priority"]
-            st.session_state.todos.loc[df["Task"]==task_name, "Priority"]=priority
-            #st.write(st.session_state.todos)
-            #df.loc[df["Task"]==task_name, "Priority"]=priority
+            st.session_state.todos.loc[st.session_state.todos["Task"]==task_name, "Priority"]=priority
         return st.session_state.todos
     except Exception as e:
         return(f"Update failure: {str(e)}")
+
 
 def main():
     #Important note: actually a consistent database is required so that even after this app was closed, the user infos are preserved
@@ -273,14 +263,15 @@ def main():
     if not st.session_state.todos.empty:
         if st.button("Get Recommendations"):
             with st.spinner('Generating...'):
-                st.session_state.rec = getPriority()
-                rec = st.session_state.rec
+                st.session_state.rec = get_priority_recommendations(st.session_state.todos)
+
                 if st.session_state.rec:
                     st.write(st.session_state.rec)
+                    #st.write(type(st.session_state.rec))
             
             #if st.button("Update Priority List"):
-            parsed = extract_json(rec)
-            st.session_state.todos = update_priority(parsed,st.session_state.todos)
+            
+            st.session_state.todos = update_priority()
 
             priority_order = ['High', 'Medium', 'Low']
 
@@ -289,6 +280,7 @@ def main():
                 categories=priority_order, 
                 ordered=True
             )
+            
 
             # Sort the DataFrame by the Priority column
             sorted_todos = st.session_state.todos.sort_values(by='Priority', ascending=True)
