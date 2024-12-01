@@ -21,7 +21,7 @@ def hide_message():
     st.session_state.show_info = False
 
 def greeting():
-    """Greet user in different fashion"""
+    """Generate random funny greeting when the app is initiated"""
     try:
         completion = client.chat.completions.create(
             model = "gpt-4o",
