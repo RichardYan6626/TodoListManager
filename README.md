@@ -9,7 +9,7 @@ I used Streamlit for front end and OpenAI's API as backend.
 1. Random funny greeting
 2. Invalid Task Description handling
 3. AI recommendations for your priorities
-4. Review with AI for inspirations
+4. Review with AI for inspirations (To be implemented)
 
 ## Notice:
   Most tasks take days to complete and with streamlit alone, information is lost if you reopen the application.
