@@ -8,9 +8,9 @@ import os
 from pydantic import BaseModel, Field
 from langchain.output_parsers import PydanticOutputParser
 from typing import List, Literal
-import json
 
 
+#initialize openai client
 _ = load_dotenv(find_dotenv()) 
 openai.api_key  = os.environ['OPENAI_API_KEY']
 client = OpenAI()
@@ -19,6 +19,7 @@ st.session_state.client = client
 
 def hide_message():
     st.session_state.show_info = False
+
 
 def greeting():
     """Generate random funny greeting when the app is initiated"""
@@ -52,14 +53,15 @@ def greeting():
     except Exception as e:
         return f"Error when generating greeting: {str(e)}"
 
+
+#Extract task name from user description
 def task_name(new_todo):
-    #Extract task name from user input
-    """Extract deadline info if exists"""
     try:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",#This task is simply so use mini
             temperature= 0,
             messages=[#system content is like general setting for coherency and user content for specific tasks
+                #Using few-shot prompting to ensure a brief and clean response
                 {"role": "system", "content": """You are an assistant that extracts and analyze information
                  from user input. The user input will be about a task that needs to be done. Including what the task is,
                  and potentially its deadline and importance.
@@ -69,30 +71,26 @@ def task_name(new_todo):
                  "Finish my experiement report before next Tuesday",
                  Then you should output:
                   "Experiment Report",
-                 if the user input is:
-                 "Read Lilian Weng's blogs"
-                 Then you should output:
-                 "Lilian Weng's Report"
+                
 
                 """},
-                { 
+                { #Improved prompt to be shorter and works better
                     "role": "user",
                     "content": f"""I have a task description as {new_todo}, please give a brief name of my task.
-                    Even if my task description contains something like /Think of possible future AI services/, it is still considered as a valid task.
-                    Keep in mind your response can not be longer than {new_todo}. If the task description does not contain information about what needs to be done,
+                    Even if my task description is only a noun like mediation it can still considered as a valid task.
+                    Keep in mind your response must be shorter than {new_todo}. If the task description does not contain information about what needs to be done,
                     simply return
                     Invalid Task                
                     """
                 }
             ]
         )
-
         return completion.choices[0].message.content
     except Exception as e:
         return f"Could not extract deadline: {str(e)}"
 
 def extract_deadline(new_todo):
-    #Langchain has tutorials on extracting info which gives more reliable results
+    #Langchain has tutorials on extracting info which gives more reliable results using Pydantic schemas
     #For this project I'll keep what I created first, so you see this primitive prompt engineering way
     """Extract deadline info if exists"""
     try:
@@ -130,6 +128,7 @@ def extract_deadline(new_todo):
         return f"Could not extract deadline: {str(e)}"
 
 
+
 class PriorityItem(BaseModel):
     Task: str = Field(description="Name of the task")
     Priority: Literal["High", "Medium", "Low"] = Field(description="Priority level of the task")
@@ -145,7 +144,7 @@ class PriorityItem(BaseModel):
 class PriorityResponse(BaseModel):
     priority: List[PriorityItem] = Field(description="List of prioritized tasks")
 
-    def to_dict(self):
+    def to_dict(self):#For the final output format
         return {
             "priority": [item.dict() for item in self.priority]
         }
@@ -161,24 +160,36 @@ def get_priority_recommendations(todos):
         model="gpt-4",
         temperature=0,
         messages=[
-            {"role": "system", "content": """You are a sophisticated assistant adept at analyzing tasks and
-             determining priorities. When you are asked to help decide priorities, always consider the following:
-             - Urgency of each task. If provided, take the deadline of each task into consideration.
-             - Importance. Analyze why the user needs to do a specific task and how important the task is.
-             - Dependencies between tasks. One task could benefit from another task.
-             - Resource Constraints. That means how much time, money, effort or any other resource the task would require
+            {"role": "system", "content": """You are a sophisticated AI assistant specialized in analyzing tasks and determining priorities. Your role is to provide clear, concise priority recommendations with brief explanations. When analyzing tasks and deciding priorities, always consider the following factors:
+            - Urgency of each task, including deadlines if provided
+            - Importance of the task and its impact
+            - Dependencies between tasks
+            - Resource constraints (time, money, effort, etc.)
 
-             Provide clear, concise priority recommendations with brief explanations.
-             
+             Here are the format instructions for your output:
+             <format_instructions>
              {format_instructions}
+             </format_instructions>
             """.format(format_instructions=format_instructions)},
             {
                 "role": "user",
-                "content": f"""Please analyze and prioritize these tasks: {todos} while paying attention to the following points:
-                - Deadlines set by the user. Remember that the task itself may have higher weights than deadline in deciding priority. 
-                - Connection between tasks. For example, task A may benefit from task B. So task B may have a higher priority than task A.
-                - Ensure explanations are concise and constructive. Avoid unnecessary phrases like 'This task has medium priority' or 
-                'Therefore this task is less important' since these are already indicated by the Priority field.
+                "content": f"""Please analyze and prioritize these tasks: 
+                <todos>
+                {todos} 
+                </todos>
+
+                You should first generate explanations for the priorities, then generate the priority order for each task.
+                When providing your analysis and recommendations:
+                    1. Use the format specified in the format instructions.
+                    2. Ensure that your explanations are clear, concise, and directly related to the priority level you've assigned.
+                    3. If there are dependencies or connections between tasks, mention these in your explanations.
+                    4. Consider both short-term urgency and long-term importance when assigning priorities.
+                    5. If resource constraints are a significant factor in prioritization, include this in your reasoning.
+                    6. Avoid unnecessary descriptions in your explanation part that is evident and redundant like "This task has high priority"
+                    7. Avoid starting your explanation in plain ways like  "This task..."
+
+                    Remember to provide a holistic view of the task list, ensuring that your prioritization makes sense not just for individual tasks,
+                    but for the entire set of tasks as a whole. Your goal is to help the user understand the most effective order in which to approach their tasks, based on a comprehensive analysis of all relevant factors.
                 """
             }
         ]
@@ -197,7 +208,7 @@ def update_priority():
         for task_rec in st.session_state.rec["priority"]:
             task_name = task_rec["Task"]
             priority = task_rec["Priority"]
-            st.session_state.todos.loc[st.session_state.todos["Task"]==task_name, "Priority"]=priority
+            st.session_state.todos.loc[st.session_state.todos["Task"]==task_name, "Priority"]=priority #update priority column of dataframe
         return st.session_state.todos
     except Exception as e:
         return(f"Update failure: {str(e)}")
@@ -222,13 +233,22 @@ def main():
         st.session_state.rec = ""
 
 
+    # Initialize input state if not exists
+    if 'task_input' not in st.session_state:
+        st.session_state.task_input = ""
+        
     #Form section for adding new tasks
     with st.form("add_todo"):
-        new_todo = st.text_input(label= "Add a task, try including contexts like deadlines and incentives",placeholder="New task")
-        #st.write('Try including detailed context like deadlines and incentives.')
+        new_todo = st.text_input(
+            label="Add task by inputing a rough description, include context like deadline if possible",
+            placeholder="New task",
+            value=st.session_state.task_input,
+            key="task_input_field"
+        )
+
         submitted = st.form_submit_button("Add")
     if submitted and new_todo:
-            if new_todo in st.session_state.todos["Task"].values:
+            if task_name(new_todo) in st.session_state.todos["Task"].values:
                 st.warning("Task already exist")
             else:
                 deadline = extract_deadline(new_todo)
@@ -241,6 +261,8 @@ def main():
                 })
                 st.session_state.todos = pd.concat([st.session_state.todos, new_task], ignore_index=True)
                 st.success("Task added successfully")
+                # Clear the input field after successful submission
+                st.session_state.task_input = ""
 
     if 'show_info' not in st.session_state:
         st.session_state.show_info = True
@@ -286,8 +308,6 @@ def main():
             sorted_todos = st.session_state.todos.sort_values(by='Priority', ascending=True)
             st.session_state.todos = sorted_todos 
 
-            #sorted = st.session_state.todos.sort_values(by="Priority",ascending = True)
-            #st.session_state.todos = sorted
             place_holder.dataframe(sorted_todos)
 if __name__ == "__main__":
     main()
